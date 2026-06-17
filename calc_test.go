@@ -6818,6 +6818,34 @@ func TestCalcCellValueCache(t *testing.T) {
 		assert.Equal(t, "120", newResult5)
 		assert.NotEqual(t, result5, newResult5, "A5 should be updated")
 	})
+	t.Run("for_calc_call_raw_value_with_cache", func(t *testing.T) {
+		f := NewFile()
+		assert.NoError(t, f.SetCellFormula("Sheet1", "A1", "DATE(2020,10,21)"))
+		exp := "dd/mm/yyyy"
+		style, err := f.NewStyle(&Style{CustomNumFmt: &exp})
+		assert.NoError(t, err)
+		assert.NoError(t, f.SetCellStyle("Sheet1", "A1", "A1", style))
+
+		result1, err := f.CalcCellValue("Sheet1", "A1", Options{RawCellValue: false})
+		assert.NoError(t, err)
+		assert.Equal(t, "21/10/2020", result1)
+
+		result2, err := f.CalcCellValue("Sheet1", "A1")
+		assert.NoError(t, err)
+		assert.Equal(t, result1, result2, "cached result should be consistent")
+
+		result3, err := f.CalcCellValue("Sheet1", "A1", Options{RawCellValue: true})
+		assert.NoError(t, err)
+		assert.Equal(t, "44125", result3)
+
+		result4, err := f.CalcCellValue("Sheet1", "A1")
+		assert.NoError(t, err)
+		assert.Equal(t, result1, result4, "cached result should be consistent")
+
+		result5, err := f.CalcCellValue("Sheet1", "A1", Options{RawCellValue: true})
+		assert.NoError(t, err)
+		assert.Equal(t, result3, result5, "cached result should be consistent")
+	})
 	t.Run("for_clear_calculation_cache", func(t *testing.T) {
 		f := NewFile()
 		assert.NoError(t, f.SetCellValue("Sheet1", "A1", 10))
@@ -7093,4 +7121,67 @@ func TestCalcImplicitIntersect(t *testing.T) {
 	assert.Equal(t, ArgMatrix, fn.implicitIntersect(
 		newMatrixFormulaArg([][]formulaArg{{newNumberFormulaArg(1)}})).Type,
 	)
+}
+
+func TestCalc3DRef(t *testing.T) {
+	prepareCalcData := func() *File {
+		f := NewFile()
+		_, err := f.NewSheet("Sheet 2")
+		assert.NoError(t, err)
+		_, err = f.NewSheet("Sheet3")
+		assert.NoError(t, err)
+		_, err = f.NewSheet("Sheet4")
+		assert.NoError(t, err)
+		for i, sheet := range []string{"Sheet1", "Sheet 2", "Sheet3", "Sheet4"} {
+			base := int64(i + 1)
+			assert.NoError(t, f.SetCellValue(sheet, "A1", base*10))
+			assert.NoError(t, f.SetCellValue(sheet, "A2", base))
+			assert.NoError(t, f.SetCellValue(sheet, "B1", base*100))
+		}
+		return f
+	}
+	formulaList := map[string]string{
+		"SUM(Sheet1:Sheet4!A1)":     "100",
+		"SUM(Sheet1:Sheet4!$A$1)":   "100",
+		"SUM(Sheet1:Sheet3!A1)":     "60",
+		"SUM('Sheet 2:Sheet4'!A1)":  "90",
+		"SUM(Sheet1:Sheet1!A1)":     "10",
+		"SUM(Sheet1:Sheet4!A1:A2)":  "110",
+		"SUM(Sheet1:Sheet4!A1:B1)":  "1100",
+		"AVERAGE(Sheet1:Sheet4!A1)": "25",
+		"MIN(Sheet1:Sheet4!A1)":     "10",
+		"MAX(Sheet1:Sheet4!A1)":     "40",
+		"COUNT(Sheet1:Sheet4!A1)":   "4",
+		"COUNTA(Sheet1:Sheet4!A1)":  "4",
+		"PRODUCT(Sheet1:Sheet4!A1)": "240000",
+		"SUM(Sheet4:Sheet1!A1)":     "100",
+	}
+	for formula, expected := range formulaList {
+		f := prepareCalcData()
+		defer func() {
+			assert.NoError(t, f.Close())
+		}()
+		assert.NoError(t, f.SetCellFormula("Sheet1", "C1", formula))
+		result, err := f.CalcCellValue("Sheet1", "C1")
+		assert.NoError(t, err)
+		assert.Equal(t, expected, result, formula)
+	}
+	calcError := map[string][]string{
+		"SUM(Sheet1:SheetN!A1)": {"#REF!", "sheet SheetN does not exist"},
+		"SUM(SheetN:Sheet3!A1)": {"#REF!", "sheet SheetN does not exist"},
+		"SUM(Sheet1:Sheet3!A)":  {"#NAME?", newCoordinatesToCellNameError(1, -1).Error()},
+	}
+	for formula, expected := range calcError {
+		f := prepareCalcData()
+		defer func() {
+			assert.NoError(t, f.Close())
+		}()
+		assert.NoError(t, f.SetCellFormula("Sheet1", "C1", formula))
+		result, err := f.CalcCellValue("Sheet1", "C1")
+		assert.EqualError(t, err, expected[1], formula)
+		assert.Equal(t, expected[0], result, formula)
+	}
+	assert.Empty(t, split3DReference("Sheet1:Sheet2:Sheet3!A1"))
+	assert.Empty(t, split3DReference(":Sheet1!A1"))
+	assert.Empty(t, split3DReference("!A1"))
 }

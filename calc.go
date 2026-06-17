@@ -877,15 +877,22 @@ func (fn *formulaFuncs) implicitIntersect(arg formulaArg) formulaArg {
 //	ZTEST
 func (f *File) CalcCellValue(sheet, cell string, opts ...Options) (result string, err error) {
 	entry := sheet + "!" + cell
-	if cachedResult, ok := f.calcCache.Load(entry); ok {
-		return cachedResult.(string), nil
-	}
 	options := f.getOptions(opts...)
 	var (
 		rawCellValue = options.RawCellValue
 		styleIdx     int
 		token        formulaArg
 	)
+	if rawCellValue {
+		if cachedResult, ok := f.calcRawCache.Load(entry); ok {
+			return cachedResult.(string), nil
+		}
+	}
+	if !rawCellValue {
+		if cachedResult, ok := f.calcCache.Load(entry); ok {
+			return cachedResult.(string), nil
+		}
+	}
 	if token, err = f.calcCellValue(&calcContext{
 		entry:             entry,
 		maxCalcIterations: options.MaxCalcIterations,
@@ -903,7 +910,7 @@ func (f *File) CalcCellValue(sheet, cell string, opts ...Options) (result string
 		if precision > 15 {
 			result, err = f.formattedValue(&xlsxC{S: styleIdx, V: strings.ToUpper(strconv.FormatFloat(decimal, 'G', 15, 64))}, rawCellValue, CellTypeNumber)
 			if err == nil {
-				f.calcCache.Store(entry, result)
+				f.storeCalcCache(entry, result, rawCellValue)
 			}
 			return
 		}
@@ -911,20 +918,31 @@ func (f *File) CalcCellValue(sheet, cell string, opts ...Options) (result string
 			result, err = f.formattedValue(&xlsxC{S: styleIdx, V: strings.ToUpper(strconv.FormatFloat(decimal, 'f', -1, 64))}, rawCellValue, CellTypeNumber)
 		}
 		if err == nil {
-			f.calcCache.Store(entry, result)
+			f.storeCalcCache(entry, result, rawCellValue)
 		}
 		return
 	}
 	result, err = f.formattedValue(&xlsxC{S: styleIdx, V: token.Value()}, rawCellValue, CellTypeInlineString)
 	if err == nil {
-		f.calcCache.Store(entry, result)
+		f.storeCalcCache(entry, result, rawCellValue)
 	}
 	return
+}
+
+// storeCalcCache stores the calculated result in the cache with the given entry
+// as the key.
+func (f *File) storeCalcCache(entry, result string, rawCellValue bool) {
+	if rawCellValue {
+		f.calcRawCache.Store(entry, result)
+		return
+	}
+	f.calcCache.Store(entry, result)
 }
 
 // clearCalcCache clear all calculation related caches.
 func (f *File) clearCalcCache() {
 	f.calcCache.Clear()
+	f.calcRawCache.Clear()
 	f.formulaArgCache.Clear()
 }
 
@@ -1627,6 +1645,9 @@ func (cr *cellRange) prepareCellRange(col, row bool, cellRef cellRef) error {
 // characters and default sheet name.
 func (f *File) parseReference(ctx *calcContext, sheet, reference string) (formulaArg, error) {
 	reference = strings.ReplaceAll(reference, "$", "")
+	if parts := split3DReference(reference); len(parts) == 3 {
+		return f.parse3DReference(ctx, parts)
+	}
 	ranges, cellRanges, cellRefs := strings.Split(reference, ":"), list.New(), list.New()
 	if len(ranges) > 1 {
 		var cr cellRange
@@ -1664,6 +1685,89 @@ func (f *File) parseReference(ctx *calcContext, sheet, reference string) (formul
 	}
 	cellRefs.PushBack(cellRef)
 	return f.rangeResolver(ctx, cellRefs, cellRanges)
+}
+
+// parse3DReference detects a 3D reference from a range reference and expands it
+// across the workbook-order sheet range.
+func (f *File) parse3DReference(ctx *calcContext, parts []string) (formulaArg, error) {
+	firstSheet, lastSheet, cellRef := parts[0], parts[1], parts[2]
+	sheets, err := f.expand3DSheetRange(firstSheet, lastSheet)
+	if err != nil {
+		return newErrorFormulaArg(formulaErrorREF, formulaErrorREF), err
+	}
+	var matrix [][]formulaArg
+	for _, sheet := range sheets {
+		result, err := f.parseReference(ctx, sheet, cellRef)
+		if err != nil {
+			return newErrorFormulaArg(formulaErrorNAME, formulaErrorNAME), err
+		}
+		switch result.Type {
+		case ArgMatrix:
+			matrix = append(matrix, result.Matrix...)
+		default:
+			matrix = append(matrix, []formulaArg{result})
+		}
+	}
+	return newMatrixFormulaArg(matrix), err
+}
+
+// split3DReference parses a reference string for a 3D reference of the form
+// formula structure in FirstSheet:LastSheet!CellReference and returns the three
+// components if valid, or an empty slice if not.
+func split3DReference(reference string) []string {
+	var parts []string
+	idx := strings.Index(reference, "!")
+	if idx < 0 || idx == len(reference)-1 {
+		return parts
+	}
+	sheetsRef, cellRef := reference[:idx], reference[idx+1:]
+	firstSheet, rest, ok := readSheetToken(sheetsRef)
+	if !ok || len(rest) < 2 || rest[0] != ':' {
+		return parts
+	}
+	lastSheet, rest, ok := readSheetToken(rest[1:])
+	if !ok || rest != "" {
+		return parts
+	}
+	if firstSheet == "" || lastSheet == "" {
+		return parts
+	}
+	return []string{firstSheet, lastSheet, cellRef}
+}
+
+// readSheetToken reads an unquoted sheet name from the front of s and
+// returns (name, remaining, ok). A `:` ends the name; a `!` or `'` is
+// rejected as malformed for the 3D shape parser.
+func readSheetToken(s string) (name, rest string, ok bool) {
+	if s == "" {
+		return "", "", false
+	}
+	for i, r := range s {
+		if r == ':' {
+			return s[:i], s[i:], true
+		}
+		if r == '!' || r == '\'' {
+			return "", "", false
+		}
+	}
+	return s, "", true
+}
+
+// expand3DSheetRange returns the workbook-order slice of sheet names
+// from first sheet to last sheet inclusive.
+func (f *File) expand3DSheetRange(sheet1, sheet2 string) ([]string, error) {
+	firstSheetIdx, err := f.GetSheetIndex(sheet1)
+	if err != nil || firstSheetIdx < 0 {
+		return nil, ErrSheetNotExist{sheet1}
+	}
+	lastSheetIdx, err := f.GetSheetIndex(sheet2)
+	if err != nil || lastSheetIdx < 0 {
+		return nil, ErrSheetNotExist{sheet2}
+	}
+	if firstSheetIdx > lastSheetIdx {
+		firstSheetIdx, lastSheetIdx = lastSheetIdx, firstSheetIdx
+	}
+	return f.GetSheetList()[firstSheetIdx : lastSheetIdx+1], err
 }
 
 // prepareValueRange prepare value range.

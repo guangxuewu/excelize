@@ -29,6 +29,9 @@ var (
 	ErrCellCharsLength = fmt.Errorf("cell value must be 0-%d characters", TotalCellChars)
 	// ErrCellStyles defined the error message on cell styles exceeds the limit.
 	ErrCellStyles = fmt.Errorf("the cell styles exceeds the %d limit", MaxCellStyles)
+	// ErrChartTitle defined the error message on both formula and rich text for
+	// chart title.
+	ErrChartTitle = errors.New("cannot set both 'Formula' and 'Paragraph' for chart title")
 	// ErrColumnNumber defined the error message on receive an invalid column
 	// number.
 	ErrColumnNumber = fmt.Errorf("the column number must be greater than or equal to %d and less than or equal to %d", MinColumns, MaxColumns)
@@ -124,6 +127,12 @@ var (
 	// ErrPasswordLengthInvalid defined the error message on invalid password
 	// length.
 	ErrPasswordLengthInvalid = errors.New("password length invalid")
+	// ErrPivotTableShowValuesAsBaseField defined the error message on enable
+	// this kind of show value as type requires a base field.
+	ErrPivotTableShowValuesAsBaseField = errors.New("this kind of show value as type requires a base field")
+	// ErrPivotTableShowValuesAsBaseItem defined the error message on enable
+	// this kind of show value as type and base field requires a base item.
+	ErrPivotTableShowValuesAsBaseItem = errors.New("this kind of show value as type and base field requires a base item")
 	// ErrPivotTableClassicLayout defined the error message on enable
 	// ClassicLayout and CompactData in the same time.
 	ErrPivotTableClassicLayout = errors.New("cannot enable ClassicLayout and CompactData in the same time")
@@ -189,6 +198,9 @@ var (
 	// ErrUnsupportedNumberFormat defined the error message on unsupported
 	// number format expression.
 	ErrUnsupportedNumberFormat = errors.New("unsupported number format token")
+	// ErrUnsupportedPivotTableShowValuesAsType defined the error message on
+	// receiving the unsupported pivot table show value as type.
+	ErrUnsupportedPivotTableShowValuesAsType = errors.New("unsupported pivot table show value as type")
 	// ErrWorkbookFileFormat defined the error message on receive an
 	// unsupported workbook file format.
 	ErrWorkbookFileFormat = errors.New("unsupported workbook file format")
@@ -355,6 +367,12 @@ func newPivotTableSelectedItemError(item, field string) error {
 // pivot table range.
 func newPivotTableRangeError(msg string) error {
 	return fmt.Errorf("parameter 'PivotTableRange' parsing error: %s", msg)
+}
+
+// newPivotTableShowValuesAsBaseFieldError defined the error message on receiving
+// the invalid pivot table show value as base field.
+func newPivotTableShowValuesAsBaseFieldError(field string) error {
+	return fmt.Errorf("base field %s does not exist in shared items", field)
 }
 
 // newStreamSetRowError defined the error message on the stream writer
